@@ -1,7 +1,3 @@
-# OPENAQ_API_KEY="9bddb334cb07adf84762ed4e5f4fc2f926aae63f3e0839759e004cc082a1d885"
-# OPENAQ_PM25_PARAMETER_ID=2
-# OPENMETEO_BASE_URL="https://archive-api.open-meteo.com/v1/archive"
-
 """
 Pulls one day of PM2.5 (OpenAQ) and weather (Open-Meteo) for Denver La Casa NCORE.
 Merges on timestamp and prints the result.
