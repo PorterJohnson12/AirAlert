@@ -110,6 +110,7 @@ For every decision you make: write your answer in one clear sentence, then expla
 
 **Your decision:**
 
+
 **Your reasoning:**
 
 ---
