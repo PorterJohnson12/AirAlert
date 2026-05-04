@@ -109,9 +109,11 @@ For every decision you make: write your answer in one clear sentence, then expla
 - The serving layer responds to on-demand prediction requests — does it matter how old the input features are when someone asks "is the air safe right now?"
 
 **Your decision:**
-
+Yes, we do need to distinguish between fresh and stale data, with stale data starting at 3 hours old. 
 
 **Your reasoning:**
+We want to keep historical data for training to make sure the model is accurate, then make sure results/inputs are valid and pertain close to real-time by
+using the fresh data.
 
 ---
 
@@ -125,8 +127,10 @@ For every decision you make: write your answer in one clear sentence, then expla
 - Does it matter whether the missingness is random (battery issue) or systematic (sensor in a high-pollution area that goes offline during spikes)?
 
 **Your decision:**
+We'd fill with the average between the gap and add an imputed flag
 
 **Your reasoning:**
+We can keep the data relatively consistent and flag the data as imputed to keep clarity without having to risk using old data to fill in empty spots.
 
 ---
 
@@ -140,8 +144,10 @@ For every decision you make: write your answer in one clear sentence, then expla
 - What is the cost of a false negative (predicting safe when air is actually unsafe), and what F1 floor reflects that cost?
 
 **Your decision:**
+When the R^2 score drops by 5% 
 
 **Your reasoning:**
+It keeps compute costs down and retrains when the model needs.
 
 ---
 
@@ -159,8 +165,10 @@ For every decision you make: write your answer in one clear sentence, then expla
 | Feature | How computed | Why it's useful |
 |---|---|---|
 | is_unsafe | pm25 > 35.4 | Target variable |
-| | | |
-| | | |
+| pm25_sequence_48h | Last 48 hours of PM2.5 readings | LSTM ingests full temporal pattern |
+| temperature_sequence_48h | Last 48 hours of temperature | Models how weather drives pollution dispersion |
+| hour_of_day_encoded | One-hot or sin/cos encoding of hour | Captures diurnal pollution cycles |
+| day_of_week_encoded | One-hot or sin/cos encoding of day | Models weekly traffic/activity patterns |
 
 ---
 
@@ -174,8 +182,10 @@ For every decision you make: write your answer in one clear sentence, then expla
 - Does within-hour variance in PM2.5 carry predictive signal worth preserving, or is the hourly mean sufficient?
 
 **Your decision:**
+Aggregate to one row per location per hour using OpenAQ's /hours endpoint, which handles within-hour aggregation on the API side.
 
 **Your reasoning:**
+The /hours endpoint already returns pre-aggregated hourly means, making within-hour variance unavailable and the decision moot. This guarantees consistent structure (one row = one hour), makes lag features unambiguous, and aligns naturally with Open-Meteo's hourly weather data. No additional aggregation logic is needed in transform.py
 
 ---
 
@@ -189,8 +199,10 @@ For every decision you make: write your answer in one clear sentence, then expla
 - How does your choice affect `train.py`, the MLflow registry structure, and what `serve.py` needs to load at startup?
 
 **Your decision:**
+Train one model per city, with each city model trained on all sensor locations within that city combined.
 
 **Your reasoning:**
+A single global model would blur city-specific pollution patterns — Ogden's refinery corridor behaves differently than Provo near Utah Lake. Per-sensor models would have too little data per location. City-level models balance data volume with geographic specificity, keep MLflow manageable at three registered models, and make serve.py a simple city-keyed lookup at startup.
 
 ---
 
