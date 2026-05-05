@@ -14,7 +14,7 @@ Output schema (Contract 1):
     humidity       float64              — % relative humidity from Open-Meteo
     pm25_imputed   bool                 — True if pm25 was filled by interpolation
 
-Owner: Ted Roper
+Owner: Porter Johnson
 """
 
 from __future__ import annotations
