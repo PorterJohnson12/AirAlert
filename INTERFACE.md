@@ -1,6 +1,6 @@
 # AirAlert — Interface Contract
 
-**Team:** Ted Roper + Partner
+**Team:** Porter Johnson + Ted Roper
 **Last updated:** 2026-05-04
 
 This is a living document. You will update it as you learn more about the system. That is expected and encouraged. The rule: both partners must understand and agree to every change before it is committed. Any change that affects a module boundary must be reflected in the code within the same PR.
@@ -11,10 +11,10 @@ This is a living document. You will update it as you learn more about the system
 
 | Module | Owner (writes it) | Reviewer (reviews PR) |
 |---|---|---|
-| `src/ingest.py` | Ted Roper | Partner |
-| `src/transform.py` | Partner | Ted Roper |
-| `src/train.py` | Ted Roper | Partner |
-| `src/serve.py` | Partner | Ted Roper |
+| `src/ingest.py` | Porter Johnson | Ted Roper |
+| `src/transform.py` | Ted Roper | Porter Johnson |
+| `src/train.py` | Ted Roper | Porter Johnson |
+| `src/serve.py` | Porter Johnson | Ted Roper |
 | `dags/airalert_dag.py` | Both | Both |
 | `app/dashboard.py` | Both | Both |
 
@@ -36,6 +36,8 @@ These values are fixed and must be identical everywhere they appear in the codeb
 | `FRESHNESS_THRESHOLD_HOURS` | `3` | `serve.py` |
 | `LAG_WINDOW_HOURS` | `48` | `transform.py` |
 | `MIN_COVERAGE_FRACTION` | `0.5` | `transform.py`, `train.py` |
+| `MAX_GAP_HOURS` | `6` | `ingest.py` |
+| `CITY_MODEL_KEYS` | `("salt_lake_city", "ogden", "provo")` | `ingest.py`, `transform.py`, `train.py`, `serve.py` |
 
 > **Timezone rule:** All datetime values in this pipeline are stored and merged in UTC. OpenAQ returns timestamps in UTC natively. Open-Meteo returns timestamps in the timezone specified by the `&timezone=` query parameter — always pass `timezone=UTC` when calling Open-Meteo so both sources align without conversion.
 
@@ -177,10 +179,10 @@ The `/hours` endpoint already returns pre-aggregated hourly means, making within
 **The question:** Should the model be trained on data from all locations combined (one global model) or separately per location (one model per location)?
 
 **Your decision:**
-Train one model per city, with each city model trained on all sensor locations within that city combined.
+Train one model per city — Salt Lake City, Ogden, and Provo — with each city model trained on all sensor locations within that city combined. The set of cities is locked in `CITY_MODEL_KEYS = ("salt_lake_city", "ogden", "provo")`.
 
 **Your reasoning:**
-A single global model would blur city-specific pollution patterns — Ogden's refinery corridor behaves differently than Provo near Utah Lake. Per-sensor models would have too little data per location. City-level models balance data volume with geographic specificity, keep MLflow manageable at three registered models, and make `serve.py` a simple city-keyed lookup at startup.
+A single global model would blur city-specific pollution patterns — Ogden's refinery corridor behaves differently than Provo near Utah Lake. Per-sensor models would have too little data per location. City-level models balance data volume with geographic specificity, keep MLflow manageable at three registered models, and make `serve.py` a simple city-keyed lookup at startup. The `city` label rides through Contract 1 from `ingest.py` (assigned via `LOCATION_REGISTRY`) and must be carried through `transform.py` so `train.py` can group rows by city at fit time.
 
 ---
 
@@ -232,6 +234,7 @@ Output file: `data/raw/pm25_{YYYY-MM-DD}.csv`
 |---|---|---|---|---|
 | `timestamp` | Both (merge key) | datetime64[ns, UTC] | No | UTC only; one row per location per hour after aggregation |
 | `location_id` | OpenAQ | int64 | No | OpenAQ location ID |
+| `city` | `LOCATION_REGISTRY` lookup in `ingest.py` | string | No | One of `CITY_MODEL_KEYS`; per Decision 6 this drives per-city model routing in `transform.py`, `train.py`, and `serve.py` |
 | `pm25` | OpenAQ | float64 | Yes | μg/m³; null if sensor offline for that hour |
 | `temperature` | Open-Meteo (`temperature_2m`) | float64 | Yes | °C; null if Open-Meteo had no coverage |
 | `humidity` | Open-Meteo (`relative_humidity_2m`) | float64 | Yes | %; null if Open-Meteo had no coverage |
@@ -323,7 +326,7 @@ FEATURE_COLS = (
 
 | Convention | Your decision |
 |---|---|
-| Branch naming format | `[initials]/[feature]` → e.g. `tr/ingest-foundation` |
+| Branch naming format | `[initials]/[feature]` → e.g. `pj/ingest-foundation`, `tr/transform-foundation` |
 | Commit message format | `module: description` → e.g. `ingest: add schema validation` |
 | PR review rule | Neither partner merges their own PR — the other must approve |
 | Main branch protection | Direct pushes to main are not allowed |
@@ -363,3 +366,4 @@ When you update this document mid-project, record it here.
 | Date | What changed | Why | Both partners agreed? |
 |---|---|---|---|
 | 2026-05-04 | Initial contract created; Decisions 1–6 answered; Contracts 1–3 complete | W5A1 deliverable | Yes |
+| 2026-05-04 | Added `city` column to Contract 1; added `CITY_MODEL_KEYS` and `MAX_GAP_HOURS` to shared constants; locked target cities to SLC/Ogden/Provo | Decision 6 (per-city models) needed a way to route rows by city — `transform.py` and `train.py` couldn't otherwise group | PJ done; TR to mirror in `transform.py` (carry `city` into Contract 2) |

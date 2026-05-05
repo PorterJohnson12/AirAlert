@@ -58,6 +58,6 @@ accurate, and commit. Both partners need at least 4 entries each by end of Week 
 
 *Complete before submitting your final PR — one paragraph per partner.*
 
-**Ted Roper:** Most useful interaction, most surprising failure, one thing you'd do differently.
+**Porter Johnson:** Most useful interaction, most surprising failure, one thing you'd do differently.
 
-**Partner:** Most useful interaction, most surprising failure, one thing you'd do differently.
+**Ted Roper:** Most useful interaction, most surprising failure, one thing you'd do differently.

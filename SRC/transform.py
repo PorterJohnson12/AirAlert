@@ -19,7 +19,7 @@ Output columns:
     hour_sin, hour_cos      float64 — cyclical hour-of-day encoding
     day_sin, day_cos        float64 — cyclical day-of-week encoding
 
-Owner: Partner
+Owner: Ted Roper
 """
 
 from __future__ import annotations

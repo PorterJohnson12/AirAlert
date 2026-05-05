@@ -20,10 +20,10 @@ MLflow · FastAPI · Streamlit · OpenAQ API v3 · Open-Meteo API
 
 | Module | Owner |
 |---|---|
-| `src/ingest.py` | Ted Roper |
-| `src/transform.py` | Partner |
+| `src/ingest.py` | Porter Johnson |
+| `src/transform.py` | Ted Roper |
 | `src/train.py` | Ted Roper |
-| `src/serve.py` | Partner |
+| `src/serve.py` | Porter Johnson |
 | `dags/airalert_dag.py` | Both |
 | `app/dashboard.py` | Both |
 
@@ -55,6 +55,8 @@ UNSAFE_THRESHOLD          = 35.4          # μg/m³ EPA 24-hr PM2.5 standard
 FRESHNESS_THRESHOLD_HOURS = 3             # serving: reject inputs older than this
 LAG_WINDOW_HOURS          = 48            # number of lag columns in Contract 2
 MIN_COVERAGE_FRACTION     = 0.5           # drop location if <50% hours have data
+MAX_GAP_HOURS             = 6             # ingest: abort location if gap exceeds this
+CITY_MODEL_KEYS           = ("salt_lake_city", "ogden", "provo")  # one model per city (Decision 6)
 MLFLOW_EXPERIMENT         = "AirAlert"
 MODEL_NAME                = "AirAlert"
 MLFLOW_URI                = "http://localhost:5000"
@@ -76,6 +78,7 @@ File path: `data/raw/pm25_{YYYY-MM-DD}.csv`
 |---|---|---|---|
 | `timestamp` | datetime64[ns, UTC] | No | One row per location per hour |
 | `location_id` | int64 | No | OpenAQ location ID |
+| `city` | string | No | One of `CITY_MODEL_KEYS`; assigned in `ingest.py` via `LOCATION_REGISTRY` lookup |
 | `pm25` | float64 | Yes | μg/m³; null if sensor offline |
 | `temperature` | float64 | Yes | °C from Open-Meteo |
 | `humidity` | float64 | Yes | % from Open-Meteo |
@@ -113,9 +116,9 @@ FEATURE_COLS = (
 
 ## Contract 3 — MLflow model
 
-- Registered as `"AirAlert"` at `Production` stage in MLflow at `http://localhost:5000`
-- Model expects input with exactly the columns in `FEATURE_COLS` above
-- One model registered per city (e.g. `"AirAlert-Denver"`, `"AirAlert-Ogden"`, `"AirAlert-Provo"`)
+- One model registered per city in MLflow at `http://localhost:5000`, using the naming convention `"AirAlert-{city}"` for each `city` in `CITY_MODEL_KEYS` — i.e. `"AirAlert-salt_lake_city"`, `"AirAlert-ogden"`, `"AirAlert-provo"`. All three are promoted to the `Production` stage by `train.py`.
+- Each model expects input with exactly the columns in `FEATURE_COLS` above
+- `serve.py` does a city-keyed lookup at startup using the inbound row's `city` value
 
 ---
 
