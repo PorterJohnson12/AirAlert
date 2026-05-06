@@ -1,4 +1,5 @@
 .env
+.astro/
 
 # Python
 __pycache__/
