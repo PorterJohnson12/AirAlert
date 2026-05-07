@@ -55,11 +55,14 @@ requirements.txt              # additions only when explicitly asked
 
 ## Output File Naming Convention
 
-When generating any code that saves files, use this convention:
+When generating any code that saves files, use this convention (W6A1: all
+runtime data lives under `include/`):
 
 ```
-data/raw/pm25_{context['ds']}.csv          # ingest.py output
-data/features/features_{context['ds']}.csv  # transform.py output
+include/data/raw/pm25_{context['ds']}.csv             # ingest.py / fetch_air_quality
+include/data/features/features_{context['ds']}.csv    # transform.py / engineer_features
+include/models/latest_model.pkl                       # train.py — joblib dump of {city: estimator}
+include/models/metrics_{context['ds']}.json           # train.py / retrain_model — XCom return value
 ```
 
 ```python

@@ -18,30 +18,42 @@ MLflow · FastAPI · Streamlit · OpenAQ API v3 · Open-Meteo API
 
 ## Module Ownership
 
-| Module | Owner |
+| Module / W6A1 task | Owner |
 |---|---|
-| `src/ingest.py` | Porter Johnson |
-| `src/transform.py` | Ted Roper |
-| `src/train.py` | Ted Roper |
-| `src/serve.py` | Porter Johnson |
+| `include/src/ingest.py` (`fetch_air_quality`) | Porter Johnson |
+| `include/src/transform.py` (`engineer_features`) | Ted Roper |
+| `include/src/train.py` (`retrain_model`) | Porter Johnson |
+| `validate_schema` (inline in DAG) | Ted Roper |
+| `src/serve.py` | Ted Roper |
 | `dags/airalert_dag.py` | Both |
 | `app/dashboard.py` | Both |
 
 ---
 
-## Airflow Conventions
+## Airflow Conventions (W6A1)
 
-- Every DAG task function must accept `**context` and return a **string file path**.
-- Pull upstream paths with `context['ti'].xcom_pull(task_ids='<upstream_task_id>')`.
-- Never return a DataFrame from a task — save it to disk first, then return the path.
-- Use `context['ds']` (execution date string `YYYY-MM-DD`) in all output file names.
+Every DAG task in this project follows these rules without exception:
+
+- **`@task` decorator only** — no `PythonOperator`, no manual `xcom_push` / `xcom_pull`.
+- Returns a **string file path** — never a DataFrame, dict, or `None`.
+- Reads the execution date via `get_current_context()["ds"]` — never `datetime.now()`.
+- **Idempotency**: returns early if the output file already exists.
+- Saves the output file before the return statement (XCom carries paths, not data).
+- Raises a meaningful exception on failure (`ValueError`, `requests.HTTPError`, etc.) — `except: pass` is not acceptable.
+- Output paths live under `include/data/...`, not `data/` at the repo root.
 
 ```python
-def my_task(**context) -> str:
-    input_path: str = context['ti'].xcom_pull(task_ids='upstream_task')
-    df = pd.read_csv(input_path)
+from airflow.sdk import dag, task
+from airflow.sdk.execution_time.context import get_current_context
+
+@task
+def my_task(upstream_path: str) -> str:
+    ds = get_current_context()["ds"]
+    output_path = f"include/data/processed/{ds}.csv"
+    if Path(output_path).exists():
+        return output_path  # idempotency
+    df = pd.read_csv(upstream_path)
     # ... process ...
-    output_path = f"data/processed/{context['ds']}.csv"
     df.to_csv(output_path, index=False)
     return output_path
 ```
@@ -72,13 +84,15 @@ Never store or merge on local-timezone timestamps.
 
 ## Contract 1 Schema — `ingest.py` output → `transform.py` input
 
-File path: `data/raw/pm25_{YYYY-MM-DD}.csv`
+File path: `include/data/raw/pm25_{YYYY-MM-DD}.csv`
 
 | Column | Type | Nullable | Notes |
 |---|---|---|---|
 | `timestamp` | datetime64[ns, UTC] | No | One row per location per hour |
 | `location_id` | int64 | No | OpenAQ location ID |
 | `city` | string | No | One of `CITY_MODEL_KEYS`; assigned in `ingest.py` via `LOCATION_REGISTRY` lookup |
+| `latitude` | float64 | No | Decimal degrees; centroid of the OpenAQ location |
+| `longitude` | float64 | No | Decimal degrees; centroid of the OpenAQ location |
 | `pm25` | float64 | Yes | μg/m³; null if sensor offline |
 | `temperature` | float64 | Yes | °C from Open-Meteo |
 | `humidity` | float64 | Yes | % from Open-Meteo |
@@ -88,7 +102,7 @@ File path: `data/raw/pm25_{YYYY-MM-DD}.csv`
 
 ## Contract 2 Schema — `transform.py` output → `train.py` input
 
-File path: `data/features/features_{YYYY-MM-DD}.csv`
+File path: `include/data/features/features_{YYYY-MM-DD}.csv`
 
 | Column | Type | Nullable | Notes |
 |---|---|---|---|
@@ -119,6 +133,8 @@ FEATURE_COLS = (
 - One model registered per city in MLflow at `http://localhost:5000`, using the naming convention `"AirAlert-{city}"` for each `city` in `CITY_MODEL_KEYS` — i.e. `"AirAlert-salt_lake_city"`, `"AirAlert-ogden"`, `"AirAlert-provo"`. All three are promoted to the `Production` stage by `train.py`.
 - Each model expects input with exactly the columns in `FEATURE_COLS` above
 - `serve.py` does a city-keyed lookup at startup using the inbound row's `city` value
+- `train.py` also writes `include/models/latest_model.pkl` containing a `{city: estimator}` dict (loadable via `joblib.load()`) and `include/models/metrics_{date}.json` containing top-level `f1`, `baseline_f1`, `accuracy`, `precision`, `recall` plus a `per_city` breakdown
+- MLflow logging is wrapped in try/except — a missing tracking server logs a warning but does not fail the DAG (the green run only requires the pkl + metrics JSON on disk)
 
 ---
 
