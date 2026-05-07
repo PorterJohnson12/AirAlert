@@ -22,18 +22,22 @@ Owner: Ted Roper
 #     fastapi
 #     uvicorn[standard]
 #     mlflow
+#     joblib            # fallback path: load include/models/latest_model.pkl
 #
-# pandas is already used by ingest.py and transform.py.
+# pandas is already used by ingest.py and transform.py; joblib ships with
+# scikit-learn so it is already pulled in transitively by include/src/train.py.
 
 from __future__ import annotations
 
 import logging
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
+import joblib
 import mlflow
-import mlflow.pyfunc
+import mlflow.sklearn
 import pandas as pd
 import uvicorn
 from fastapi import FastAPI, HTTPException
@@ -50,11 +54,19 @@ CITY_MODEL_KEYS: tuple[str, ...] = ("salt_lake_city", "ogden", "provo")
 PORT: int = 8000
 LAG_WINDOW_HOURS: int = 48
 
-# location_id → city lookup.  Must stay in sync with the identical dict in
-# ingest.py — update both files simultaneously when real OpenAQ IDs are chosen.
+# Joblib fallback: include/src/train.py always writes a {city: estimator}
+# dict here, even when MLflow is unreachable.  Used by the lifespan when the
+# MLflow tracking server is down so the API can still serve predictions.
+MODELS_PICKLE_PATH: Path = Path("include/models/latest_model.pkl")
+
+# location_id → city lookup.  Mirrors the LOCATION_REGISTRY in
+# include/src/ingest.py (which carries extra sensor_id / lat / lon fields
+# the serving layer doesn't need).  Update both files simultaneously when
+# real OpenAQ IDs change.
 LOCATION_REGISTRY: dict[int, str] = {
-    # TODO: fill with real OpenAQ location IDs once chosen.
-    # e.g. 1265: "salt_lake_city"
+    8118: "salt_lake_city",
+    7841: "ogden",
+    8163: "provo",
 }
 
 # ── Feature columns (Contract 3) ──────────────────────────────────────────────
@@ -108,35 +120,105 @@ class PredictResponse(BaseModel):
 
 # ── Global model store + lifespan ─────────────────────────────────────────────
 
-# Populated once at startup; read-only during request handling.
-_models: dict[str, mlflow.pyfunc.PyFuncModel] = {}
+# Populated once at startup; read-only during request handling.  Holds the
+# scikit-learn estimator returned by either MLflow (mlflow.sklearn flavor)
+# or joblib.load() — both expose .predict() and .predict_proba().
+_models: dict[str, Any] = {}
+
+
+def _load_from_mlflow() -> dict[str, Any]:
+    """Try to load every city model from the MLflow tracking server.
+
+    Uses the sklearn flavor (matching include/src/train.py's logging call)
+    so the returned objects expose .predict_proba() natively.  Tries the
+    Production stage first per INTERFACE.md, then falls back to the
+    'latest' alias since train.py registers without transitioning stages.
+
+    Returns:
+        dict mapping each city in CITY_MODEL_KEYS to a scikit-learn estimator.
+
+    Raises:
+        mlflow.exceptions.MlflowException: If any city model cannot be loaded
+            under either Production or latest.  The lifespan catches this and
+            falls back to the joblib pickle.
+    """
+    mlflow.set_tracking_uri(MLFLOW_URI)
+    loaded: dict[str, Any] = {}
+    for city in CITY_MODEL_KEYS:
+        registered = f"{MODEL_NAME}-{city}"
+        try:
+            uri = f"models:/{registered}/Production"
+            _log.info("Loading %s from MLflow at %s", city, uri)
+            loaded[city] = mlflow.sklearn.load_model(uri)  # type: ignore[attr-defined]
+        except Exception:
+            uri = f"models:/{registered}/latest"
+            _log.info("Production stage missing — retrying %s at %s", city, uri)
+            loaded[city] = mlflow.sklearn.load_model(uri)  # type: ignore[attr-defined]
+    return loaded
+
+
+def _load_from_pickle() -> dict[str, Any]:
+    """Load every city model from include/models/latest_model.pkl.
+
+    train.py writes this pickle on every successful run as a {city: estimator}
+    dict, regardless of MLflow availability — so it is the reliable source of
+    truth when the tracking server is down.
+
+    Returns:
+        dict mapping each city in CITY_MODEL_KEYS to its estimator.
+
+    Raises:
+        FileNotFoundError: If the pickle does not exist.  Indicates train.py
+            has never run successfully — there is no model to serve.
+        KeyError: If the pickle is missing one of the expected city keys.
+    """
+    if not MODELS_PICKLE_PATH.exists():
+        raise FileNotFoundError(
+            f"{MODELS_PICKLE_PATH} not found. Run include/src/train.py before "
+            "starting the server (or start the MLflow tracking server)."
+        )
+    bundle = joblib.load(MODELS_PICKLE_PATH)
+    missing = [c for c in CITY_MODEL_KEYS if c not in bundle]
+    if missing:
+        raise KeyError(
+            f"{MODELS_PICKLE_PATH} is missing models for cities: {missing}. "
+            "Re-run include/src/train.py to regenerate."
+        )
+    return {city: bundle[city] for city in CITY_MODEL_KEYS}
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):  # type: ignore[type-arg]
-    """Load all per-city MLflow models before the server begins accepting requests.
+    """Load all per-city models before the server begins accepting requests.
 
-    MLflow exceptions are not caught — a server that starts with a missing or
-    corrupt model is dangerous and must fail loudly so the operator knows.
+    Tries MLflow first (the contract path per INTERFACE.md) and falls back to
+    the joblib pickle that train.py always writes locally.  This mirrors the
+    best-effort MLflow pattern in include/src/train.py: the pipeline must
+    still serve predictions if the MLflow tracking server is down.
 
-    Raises:
-        mlflow.exceptions.MlflowException: If any city model cannot be loaded
-            from the MLflow registry at MLFLOW_URI.
+    A complete failure (both MLflow and joblib unavailable) is fatal — the
+    exception propagates so the operator sees the startup failure rather
+    than a server that 503s on every request.
     """
-    # Decision 7 (defer to W6D3): classifier choice determines whether the
-    # loaded pyfunc model supports predict_proba natively.  If train.py logs
-    # the model with mlflow.sklearn (rather than mlflow.pyfunc), swap
-    # mlflow.pyfunc.load_model() here for mlflow.sklearn.load_model() to get
-    # direct access to predict_proba without attribute forwarding.
-    # See _run_inference() for the fallback handling in the meantime.
-    mlflow.set_tracking_uri(MLFLOW_URI)
-    for city in CITY_MODEL_KEYS:
-        uri = f"models:/{MODEL_NAME}-{city}/Production"
-        _log.info("Loading model for %s from %s", city, uri)
-        _models[city] = mlflow.pyfunc.load_model(uri)
-        _log.info("Model for %s loaded successfully.", city)
+    # Decision 7 (W6A1 placeholder): include/src/train.py uses
+    # LogisticRegression(class_weight="balanced") logged via
+    # mlflow.sklearn.log_model().  The estimator exposes predict_proba()
+    # directly, so _run_inference() can call it without the pyfunc-flavor
+    # attribute forwarding workaround.  Revisit if train.py switches
+    # classifiers (e.g. to a calibrated tree ensemble) before W6D3.
+    try:
+        _models.update(_load_from_mlflow())
+        _log.info("Loaded all %d city models from MLflow.", len(_models))
+    except Exception as mlflow_exc:
+        _log.warning(
+            "MLflow load failed (%s) — falling back to %s",
+            mlflow_exc,
+            MODELS_PICKLE_PATH,
+        )
+        _models.update(_load_from_pickle())
+        _log.info("Loaded all %d city models from pickle.", len(_models))
     yield
-    # No teardown needed — MLflow pyfunc models hold no persistent connections.
+    # No teardown — sklearn estimators hold no persistent connections.
 
 
 # ── Helper functions ───────────────────────────────────────────────────────────
@@ -243,13 +325,14 @@ def _build_feature_df(request: PredictRequest) -> pd.DataFrame:
 
 
 def _run_inference(
-    model: mlflow.pyfunc.PyFuncModel,
+    model: Any,
     feature_df: pd.DataFrame,
 ) -> tuple[int, float]:
     """Run the model and return (is_unsafe, unsafe_probability).
 
     Args:
-        model:      Loaded MLflow pyfunc model for the target city.
+        model:      Loaded scikit-learn estimator for the target city
+                    (LogisticRegression as of W6A1 — see Decision 7 note).
         feature_df: Single-row DataFrame from _build_feature_df().
 
     Returns:
@@ -259,28 +342,16 @@ def _run_inference(
     Raises:
         HTTPException(503): If model inference raises an unexpected error.
     """
-    # Decision 7 (defer to W6D3): the chosen classifier determines whether
-    # predict_proba returns well-calibrated probabilities or scores that
-    # cluster near 0 and 1.  After Decision 7 is settled:
-    #   - If CalibratedClassifierCV is used in train.py, predict_proba is
-    #     reliable and the fallback branch below can be removed.
-    #   - If the model does not support predict_proba, replace the try block
-    #     with a direct model.predict() call and document the limitation.
-    # If train.py switches to mlflow.sklearn logging, the lifespan loader
-    # should also switch to mlflow.sklearn.load_model() for native access.
+    # Decision 7 (W6A1 placeholder, may revisit by W6D3): train.py uses
+    # LogisticRegression(class_weight="balanced") which exposes a calibrated
+    # predict_proba directly.  If the team upgrades to a tree ensemble (whose
+    # raw predict_proba is poorly calibrated) the fix is to wrap training in
+    # CalibratedClassifierCV, NOT to add post-hoc calibration here.
     try:
-        proba = model.predict_proba(feature_df)  # type: ignore[attr-defined]
+        proba = model.predict_proba(feature_df)
         # Binary classifiers return [[P(safe), P(unsafe)]] — take column 1.
         unsafe_prob = float(proba[0][1])
         is_unsafe = 1 if unsafe_prob >= 0.5 else 0
-        return is_unsafe, unsafe_prob
-    except AttributeError:
-        # TODO (Decision 7): this branch yields a degenerate probability of
-        # exactly 0.0 or 1.0 — not meaningful for the dashboard confidence
-        # display.  Resolve by completing Decision 7 and updating train.py.
-        prediction = model.predict(feature_df)
-        is_unsafe = int(prediction[0])
-        unsafe_prob = float(is_unsafe)
         return is_unsafe, unsafe_prob
     except Exception as exc:
         _log.exception("Model inference failed: %s", exc)
