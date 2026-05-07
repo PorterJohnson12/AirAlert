@@ -9,13 +9,13 @@ This is a living document. You will update it as you learn more about the system
 
 ## Module Ownership
 
-| Module | Owner (writes it) | Reviewer (reviews PR) |
-|---|---|---|
-| `src/ingest.py` | porter | ted |
+|      Module     | Owner (writes it) | Reviewer (reviews PR) |
+|-----------------|-------------------|-----------------------|
+| `src/ingest.py` | porter   | ted |
 | `src/transform.py` | ted | porter |
 | `src/train.py` | porter | ted |
 | `src/serve.py` | ted | porter |
-| `dags/airalert_dag.py` | Both | Both |
+| `dags/airalert_dag.py`| Both | Both |
 | `app/dashboard.py` | Both | Both |
 
 ---
