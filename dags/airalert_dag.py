@@ -23,8 +23,7 @@ import sys
 from pathlib import Path
 
 import pandas as pd
-from airflow.sdk import dag, task
-from airflow.sdk.execution_time.context import get_current_context
+from airflow.sdk import dag, get_current_context, task
 from pendulum import datetime
 
 # Make `include/` importable as a Python package root from inside the

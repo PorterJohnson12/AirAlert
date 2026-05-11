@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python -m include.src.transform 2026-04-25)",
+      "Bash(python -m include.src.train 2026-04-25)",
+      "Bash(python -c \"import joblib; m = joblib.load\\('include/models/latest_model.pkl'\\); print\\('Loaded:', type\\(m\\).__name__\\); print\\('Cities:', list\\(m.keys\\(\\)\\)\\); print\\('Estimators:', {k: type\\(v\\).__name__ for k, v in m.items\\(\\)}\\)\")"
+    ]
+  }
+}

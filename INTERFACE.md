@@ -15,7 +15,7 @@ This is a living document. You will update it as you learn more about the system
 | `include/src/transform.py` (W6A1 task: `engineer_features`) | Ted Roper | Porter Johnson |
 | `include/src/train.py` (W6A1 task: `retrain_model`) | Porter Johnson | Ted Roper |
 | `validate_schema` task (inline in DAG) | Ted Roper | Porter Johnson |
-| `src/serve.py` | Ted Roper | Porter Johnson |
+| `include/src/serve.py` | Ted Roper | Porter Johnson |
 | `dags/airalert_dag.py` | Both | Both |
 | `app/dashboard.py` | Both | Both |
 
