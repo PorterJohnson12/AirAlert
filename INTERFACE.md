@@ -198,9 +198,11 @@ A single global model would blur city-specific pollution patterns — Ogden's re
 - Does your chosen model's `predict_proba` output produce well-calibrated probabilities, or do they cluster near 0 and 1 in a way that would mislead a user reading a confidence score?
 - What does `unsafe_probability = 0.72` actually mean to someone using the dashboard — and is your model's output trustworthy enough to display that number?
 
-**Your decision:** *(defer to W6D3)*
+**Your decision:**
+Use `LogisticRegression(class_weight="balanced", solver="liblinear")` as the W6A1 classifier. `serve.py` returns `predict_proba()[:, 1]` directly as `unsafe_probability` without post-hoc calibration.
 
-**Your reasoning:** *(defer to W6D3)*
+**Your reasoning:**
+LogisticRegression's `predict_proba` uses a sigmoid transform, so its outputs are well-calibrated out of the box — a score of 0.72 genuinely represents approximately 72% confidence in the unsafe prediction, which is meaningful to display on the dashboard. Tree ensembles (Random Forest, XGBoost) produce leaf-frequency probabilities that cluster near 0 and 1 and require a post-hoc `CalibratedClassifierCV` wrapper before they can be trusted; we don't want to add that complexity to `serve.py` for a W6A1 placeholder. `class_weight="balanced"` handles the unsafe-class minority without oversampling. The model is explicitly labelled as a placeholder — swapping to a calibrated ensemble in a later week requires only changing `train.py`; `serve.py` and `dashboard.py` rely solely on `.predict_proba()` and are unaffected.
 
 ---
 
