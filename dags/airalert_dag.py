@@ -11,7 +11,7 @@ Wires four Airflow tasks following the TaskFlow API pattern:
 Conventions per W6A1 Part 2 (every task):
 - @task decorator (no PythonOperator, no manual xcom_push/pull)
 - Returns a string file path
-- Reads the execution date via the injected ``**context`` kwarg as ``context["ds"]``
+- Uses get_current_context()['ds'] for the execution date
 - Idempotency check: returns early if the output file already exists
 - Raises a meaningful exception on failure
 """
@@ -23,6 +23,7 @@ from pathlib import Path
 
 import pandas as pd
 from airflow.sdk import dag, task
+from airflow.sdk.execution_time.context import get_current_context
 from pendulum import datetime
 
 # Make `include/` importable as a Python package root from inside the
@@ -66,13 +67,14 @@ CONTRACT_1_DTYPES: dict[str, str] = {
 def airalert_pipeline():
 
     @task
-    def fetch_air_quality(**context) -> str:
+    def fetch_air_quality() -> str:
         """Owner: PJ. Calls OpenAQ + Open-Meteo for every entry in
         LOCATION_REGISTRY, falls back to synthetic data per location on API
         failure, writes Contract 1 CSV. Idempotent inside run_all_locations."""
         from include.src.ingest import run_all_locations
 
-        return run_all_locations(context["ds"])
+        ds = get_current_context()["ds"]
+        return run_all_locations(ds)
 
     @task
     def validate_schema(raw_path: str) -> str:
@@ -106,14 +108,14 @@ def airalert_pipeline():
         return raw_path  # pass-through on success
 
     @task
-    def engineer_features(validated_path: str, **context) -> str:
+    def engineer_features(validated_path: str) -> str:
         """Owner: TR. Reads Contract 1, produces Contract 2.
 
         Idempotency check + import path will be finalized by TR after the
         ``include/src/transform.py`` migration lands in his PR. Until then
         this body imports from the current ``src.transform`` location.
         """
-        ds = context["ds"]
+        ds = get_current_context()["ds"]
         out = f"include/data/features/features_{ds}.csv"
         if Path(out).exists():
             return out

@@ -11,10 +11,11 @@ This is a living document. You will update it as you learn more about the system
 
 | Module | Owner (writes it) | Reviewer (reviews PR) |
 |---|---|---|
-| `src/ingest.py` | Porter Johnson | Ted Roper |
-| `src/transform.py` | Ted Roper | Porter Johnson |
-| `src/train.py` | Ted Roper | Porter Johnson |
-| `src/serve.py` | Porter Johnson | Ted Roper |
+| `include/src/ingest.py` (W6A1 task: `fetch_air_quality`) | Porter Johnson | Ted Roper |
+| `include/src/transform.py` (W6A1 task: `engineer_features`) | Ted Roper | Porter Johnson |
+| `include/src/train.py` (W6A1 task: `retrain_model`) | Porter Johnson | Ted Roper |
+| `validate_schema` task (inline in DAG) | Ted Roper | Porter Johnson |
+| `src/serve.py` | Ted Roper | Porter Johnson |
 | `dags/airalert_dag.py` | Both | Both |
 | `app/dashboard.py` | Both | Both |
 
@@ -136,10 +137,10 @@ Dropping missing rows would break lag features — a gap in hour 10 means `pm25_
 **The question:** Under what conditions should the pipeline retrain the model? What metric do you track, and what threshold triggers a retrain?
 
 **Your decision:**
-Retrain when the model's R² score on a rolling 7-day validation window drops by more than 5 percentage points from the best recorded R² in MLflow.
+Retrain immediately if the previous day's F1 score on the unsafe (positive) class drops below 0.60, evaluated per city.
 
 **Your reasoning:**
-R² measures how much variance the model explains, making a relative drop a stable signal across different cities with different baseline pollution levels. A 5-point drop is large enough to avoid spurious retrains from day-to-day noise but small enough to catch genuine drift before users notice degraded predictions. Using a rolling 7-day window prevents a single anomalous day (wildfire smoke event, sensor malfunction) from triggering an unnecessary retrain.
+Accuracy is misleading on this dataset — unsafe hours are the minority class, so a model that always predicts "safe" can score 90%+ accuracy while being useless for the only prediction users actually care about. F1 on the unsafe class jointly captures precision (don't cry wolf) and recall (don't miss real unsafe hours), and 0.60 is the operating point below which a public-health alert system stops being trustworthy: missing too many unsafe hours undermines the entire reason the system exists. Checking against the previous day rather than a rolling window means we catch drift fast — when a sensor calibration shifts or a smoke event changes the input distribution, we want the retrain to fire the next morning, not seven days later.
 
 ---
 
@@ -226,7 +227,7 @@ Complete these after your W5D4 design decisions are settled. Column names and ty
 
 ### Contract 1: `ingest.py` → `transform.py`
 
-Output file: `data/raw/pm25_{YYYY-MM-DD}.csv`
+Output file: `include/data/raw/pm25_{YYYY-MM-DD}.csv`
 
 > This file is the merged output of both API calls. OpenAQ supplies `pm25` and `location_id`. Open-Meteo supplies `temperature` and `humidity`. They are joined on `(location_id, timestamp)` — see the merge rule in the Data Sources section above.
 
@@ -235,6 +236,8 @@ Output file: `data/raw/pm25_{YYYY-MM-DD}.csv`
 | `timestamp` | Both (merge key) | datetime64[ns, UTC] | No | UTC only; one row per location per hour after aggregation |
 | `location_id` | OpenAQ | int64 | No | OpenAQ location ID |
 | `city` | `LOCATION_REGISTRY` lookup in `ingest.py` | string | No | One of `CITY_MODEL_KEYS`; per Decision 6 this drives per-city model routing in `transform.py`, `train.py`, and `serve.py` |
+| `latitude` | `LOCATION_REGISTRY` lookup | float64 | No | Decimal degrees; centroid of the OpenAQ location |
+| `longitude` | `LOCATION_REGISTRY` lookup | float64 | No | Decimal degrees; centroid of the OpenAQ location |
 | `pm25` | OpenAQ | float64 | Yes | μg/m³; null if sensor offline for that hour |
 | `temperature` | Open-Meteo (`temperature_2m`) | float64 | Yes | °C; null if Open-Meteo had no coverage |
 | `humidity` | Open-Meteo (`relative_humidity_2m`) | float64 | Yes | %; null if Open-Meteo had no coverage |
@@ -244,7 +247,7 @@ Output file: `data/raw/pm25_{YYYY-MM-DD}.csv`
 
 ### Contract 2: `transform.py` → `train.py`
 
-Output file: `data/features/features_{YYYY-MM-DD}.csv`
+Output file: `include/data/features/features_{YYYY-MM-DD}.csv`
 
 > Each row represents one (location, hour) observation with all lag features pre-computed. Rows with fewer than 48 valid prior hours are dropped (insufficient history). The `pm25_lag_*` and `temperature_lag_*` columns expand to 48 columns each — only representative entries shown; the full set follows the same pattern.
 
@@ -367,3 +370,6 @@ When you update this document mid-project, record it here.
 |---|---|---|---|
 | 2026-05-04 | Initial contract created; Decisions 1–6 answered; Contracts 1–3 complete | W5A1 deliverable | Yes |
 | 2026-05-04 | Added `city` column to Contract 1; added `CITY_MODEL_KEYS` and `MAX_GAP_HOURS` to shared constants; locked target cities to SLC/Ogden/Provo | Decision 6 (per-city models) needed a way to route rows by city — `transform.py` and `train.py` couldn't otherwise group | PJ done; TR to mirror in `transform.py` (carry `city` into Contract 2) |
+| 2026-05-07 | Decision 3 finalized: F1<0.60 on unsafe class, previous-day eval, per city | W6A1 Part 1 — switched from R² (wrong metric for binary classification) to F1 on unsafe class | PJ done; TR sign off in PR |
+| 2026-05-07 | W6A1 ownership: PJ → fetch_air_quality + retrain_model (2 tasks); TR → engineer_features + validate_schema (2 tasks). PJ scaffolds initial validate_schema body inline in DAG; TR refines as documented owner. Also corrected serve.py owner to TR (was PJ in W5A1 split). | Balanced 2-2 split per W6A1 Part 2 | Yes |
+| 2026-05-07 | Added `latitude` and `longitude` columns to Contract 1; migrated all data and source paths to `include/data/` and `include/src/` | W6A1 requires `include/` layout, Part 4 verifies 9 columns in raw CSV (lat/lon were referenced in merge rules but never made it into the schema) | PJ done; TR sign off in PR |
