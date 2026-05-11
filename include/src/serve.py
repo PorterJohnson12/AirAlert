@@ -158,19 +158,21 @@ def _load_from_mlflow() -> dict[str, Any]:
 
 
 def _load_from_pickle() -> dict[str, Any]:
-    """Load every city model from include/models/latest_model.pkl.
+    """Load per-city models from include/models/latest_model.pkl.
 
     train.py writes this pickle on every successful run as a {city: estimator}
     dict, regardless of MLflow availability — so it is the reliable source of
-    truth when the tracking server is down.
+    truth when the tracking server is down.  Cities whose training split was
+    single-class (e.g. all-safe) are skipped by train.py and absent from the
+    bundle; this is logged as a warning rather than a fatal error so the server
+    can still serve predictions for the cities that did train.
 
     Returns:
-        dict mapping each city in CITY_MODEL_KEYS to its estimator.
+        dict mapping each available city to its estimator.
 
     Raises:
-        FileNotFoundError: If the pickle does not exist.  Indicates train.py
-            has never run successfully — there is no model to serve.
-        KeyError: If the pickle is missing one of the expected city keys.
+        FileNotFoundError: If the pickle does not exist — train.py has never
+            run successfully and there is nothing to serve.
     """
     if not MODELS_PICKLE_PATH.exists():
         raise FileNotFoundError(
@@ -180,11 +182,12 @@ def _load_from_pickle() -> dict[str, Any]:
     bundle = joblib.load(MODELS_PICKLE_PATH)
     missing = [c for c in CITY_MODEL_KEYS if c not in bundle]
     if missing:
-        raise KeyError(
-            f"{MODELS_PICKLE_PATH} is missing models for cities: {missing}. "
-            "Re-run include/src/train.py to regenerate."
+        _log.warning(
+            "Models missing for cities %s — those locations will return 503. "
+            "Re-run include/src/train.py with enough training data to fix.",
+            missing,
         )
-    return {city: bundle[city] for city in CITY_MODEL_KEYS}
+    return {city: bundle[city] for city in CITY_MODEL_KEYS if city in bundle}
 
 
 @asynccontextmanager
@@ -244,8 +247,8 @@ def _resolve_city(location_id: int) -> str:
             status_code=400,
             detail=(
                 f"Unknown location_id {location_id}. "
-                "Register it in LOCATION_REGISTRY in both SRC/serve.py "
-                "and SRC/ingest.py before use."
+                "Register it in LOCATION_REGISTRY in both include/src/serve.py "
+                "and include/src/ingest.py before use."
             ),
         )
     return city
@@ -401,6 +404,14 @@ async def predict(request: PredictRequest) -> PredictResponse:
         )
 
     city = _resolve_city(request.location_id)
+    if city not in _models:
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                f"No model loaded for city '{city}'. Its training split may have "
+                "been single-class — re-run the pipeline with more data."
+            ),
+        )
     _check_freshness(request.timestamp)
     feature_df = _build_feature_df(request)
     is_unsafe, unsafe_probability = _run_inference(_models[city], feature_df)
@@ -441,15 +452,15 @@ def serve_task(**context: Any) -> str:
     """
     raise NotImplementedError(
         "serve_task is not runnable as an Airflow task. "
-        f"Launch with: uvicorn SRC.serve:app --host 0.0.0.0 --port {PORT}"
+        f"Launch with: uvicorn include.src.serve:app --host 0.0.0.0 --port {PORT}"
     )
 
 
 # ── Local dev entry point ──────────────────────────────────────────────────────
 
 if __name__ == "__main__":
-    # reload=False is intentional: hot reload re-loads all three MLflow models
-    # on every file save, which is slow.  Set reload=True only when iterating
-    # on endpoint logic, not on model loading.
+    # reload=False is intentional: hot reload re-loads all per-city models on
+    # every file save, which is slow.  Set reload=True only when iterating on
+    # endpoint logic, not on model loading.
     logging.basicConfig(level=logging.INFO)
-    uvicorn.run("SRC.serve:app", host="0.0.0.0", port=PORT, reload=False)
+    uvicorn.run("include.src.serve:app", host="0.0.0.0", port=PORT, reload=False)
