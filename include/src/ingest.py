@@ -46,6 +46,10 @@ OPENMETEO_BASE_URL: str = "https://archive-api.open-meteo.com/v1/archive"
 OPENAQ_PM25_PARAMETER_ID: int = 2
 DATETIME_COL: str = "timestamp"
 MAX_GAP_HOURS: int = 6  # drop location if gap exceeds this (Decision 2)
+# History window ingested per run. LAG_WINDOW_HOURS=48 in transform.py means
+# rows for the current day need 48 prior hours of pm25/temperature, so we
+# ingest a 3-day window ending at `date` (today + 2 prior days).
+HISTORY_DAYS: int = 2
 
 # Per-city models (Decision 6). The set of valid city labels — every row
 # emitted by ingest must have city in this tuple.
@@ -96,14 +100,21 @@ def fetch_pm25(
     location_id: int,
     date: str,
     api_key: str,
+    history_days: int = HISTORY_DAYS,
 ) -> pd.DataFrame:
     """Fetch hourly PM2.5 readings for one sensor from the OpenAQ v3 API.
 
+    Fetches the window from ``date - history_days`` 00:00 UTC through ``date``
+    23:59 UTC inclusive — ``history_days + 1`` days total. The extra history
+    is required because Contract 2 lag features in ``transform.py`` need
+    LAG_WINDOW_HOURS (=48) prior observations per row.
+
     Args:
-        sensor_id:   OpenAQ sensor ID (the PM2.5 sensor for this location).
-        location_id: OpenAQ location ID associated with the sensor.
-        date:        Date string in YYYY-MM-DD format (UTC day to fetch).
-        api_key:     OpenAQ API key — passed as X-API-Key header.
+        sensor_id:    OpenAQ sensor ID (the PM2.5 sensor for this location).
+        location_id:  OpenAQ location ID associated with the sensor.
+        date:         End-date string in YYYY-MM-DD format (UTC).
+        api_key:      OpenAQ API key — passed as X-API-Key header.
+        history_days: Days of history to fetch before ``date`` (default: HISTORY_DAYS).
 
     Returns:
         DataFrame with columns [timestamp, location_id, pm25] where timestamp
@@ -115,12 +126,16 @@ def fetch_pm25(
         ValueError: If OpenAQ returns zero readings for the requested window.
         KeyError: If the response JSON is missing expected fields.
     """
+    start_date = (
+        pd.Timestamp(date) - pd.Timedelta(days=history_days)
+    ).strftime("%Y-%m-%d")
+    expected_rows = 24 * (history_days + 1)
     resp = requests.get(
         f"{OPENAQ_BASE_URL}/sensors/{sensor_id}/hours",
         headers={"X-API-Key": api_key},
         params={
-            "limit": 24,
-            "datetime_from": f"{date}T00:00:00Z",
+            "limit": expected_rows,
+            "datetime_from": f"{start_date}T00:00:00Z",
             "datetime_to": f"{date}T23:59:59Z",
         },
         timeout=30,
@@ -130,7 +145,8 @@ def fetch_pm25(
     results = resp.json()["results"]
     if not results:
         raise ValueError(
-            f"OpenAQ returned 0 readings for sensor {sensor_id} on {date}"
+            f"OpenAQ returned 0 readings for sensor {sensor_id} "
+            f"from {start_date} to {date}"
         )
     df = pd.DataFrame({
         DATETIME_COL: pd.to_datetime(
@@ -145,34 +161,36 @@ def fetch_pm25(
 def synthesize_pm25(
     location_id: int,
     date: str,
-    rows: int = 24,
+    history_days: int = HISTORY_DAYS,
 ) -> pd.DataFrame:
-    """Generate a deterministic synthetic PM2.5 frame for one location/day.
+    """Generate a deterministic synthetic PM2.5 frame for one location/window.
 
     Used when the real OpenAQ API is unavailable so the W6A1 pipeline still
     runs end-to-end. The seed is derived from (location_id, date) so the same
     input always produces the same synthetic output — the run is reproducible.
     Values are biased to occasionally cross UNSAFE_THRESHOLD (35.4) so both
-    classes appear in training data.
+    classes appear in training data. Generates ``24 * (history_days + 1)``
+    hourly rows ending at 23:00 UTC on ``date`` so the 48-hour lag features
+    in ``transform.py`` have enough history.
 
     Args:
-        location_id: OpenAQ location ID — used as part of the random seed.
-        date:        Date string in YYYY-MM-DD format — used as part of the seed.
-        rows:        Number of hourly rows to generate (default: 24).
+        location_id:  OpenAQ location ID — used as part of the random seed.
+        date:         End-date string in YYYY-MM-DD format — used as the seed.
+        history_days: Days of history to generate before ``date`` (default: HISTORY_DAYS).
 
     Returns:
         DataFrame with columns [timestamp, location_id, pm25] matching the
         schema of fetch_pm25.
     """
+    rows = 24 * (history_days + 1)
     seed = abs(hash(f"{location_id}-{date}")) % (2**32)
     rng = np.random.default_rng(seed)
     base = rng.normal(loc=12.0, scale=6.0, size=rows).clip(min=0.5)
     # roughly 1 in 6 hours has a spike crossing the 35.4 unsafe threshold
     spike_mask = rng.random(rows) < 0.15
     base[spike_mask] = rng.uniform(36.0, 90.0, size=spike_mask.sum())
-    timestamps = pd.date_range(
-        start=f"{date}T00:00:00", periods=rows, freq="h", tz="UTC"
-    )
+    start_ts = pd.Timestamp(date, tz="UTC") - pd.Timedelta(days=history_days)
+    timestamps = pd.date_range(start=start_ts, periods=rows, freq="h", tz="UTC")
     return pd.DataFrame({
         DATETIME_COL: timestamps,
         "location_id": location_id,
@@ -184,13 +202,18 @@ def fetch_weather(
     latitude: float,
     longitude: float,
     date: str,
+    history_days: int = HISTORY_DAYS,
 ) -> pd.DataFrame:
     """Fetch hourly temperature and humidity from the Open-Meteo historical API.
 
+    Fetches the window from ``date - history_days`` through ``date`` inclusive,
+    matching :func:`fetch_pm25` so the merge in :func:`merge_and_fill` aligns.
+
     Args:
-        latitude:  Decimal degrees latitude of the location centroid.
-        longitude: Decimal degrees longitude of the location centroid.
-        date:      Date string in YYYY-MM-DD format (UTC day to fetch).
+        latitude:     Decimal degrees latitude of the location centroid.
+        longitude:    Decimal degrees longitude of the location centroid.
+        date:         End-date string in YYYY-MM-DD format (UTC).
+        history_days: Days of history to fetch before ``date`` (default: HISTORY_DAYS).
 
     Returns:
         DataFrame with columns [timestamp, temperature, humidity] where
@@ -199,12 +222,15 @@ def fetch_weather(
     Raises:
         requests.HTTPError: If the API returns a non-2xx status.
     """
+    start_date = (
+        pd.Timestamp(date) - pd.Timedelta(days=history_days)
+    ).strftime("%Y-%m-%d")
     resp = requests.get(
         OPENMETEO_BASE_URL,
         params={
             "latitude": latitude,
             "longitude": longitude,
-            "start_date": date,
+            "start_date": start_date,
             "end_date": date,
             "hourly": "temperature_2m,relative_humidity_2m",
             "timezone": "UTC",
@@ -222,25 +248,27 @@ def fetch_weather(
     return df
 
 
-def synthesize_weather(date: str, rows: int = 24) -> pd.DataFrame:
-    """Generate a deterministic synthetic weather frame for one day.
+def synthesize_weather(date: str, history_days: int = HISTORY_DAYS) -> pd.DataFrame:
+    """Generate a deterministic synthetic weather frame for one window.
 
     Companion to :func:`synthesize_pm25` for use when Open-Meteo is unreachable.
     Produces plausible Utah-springtime values (cool nights, mild days, ~50% RH)
-    seeded by date for reproducibility.
+    seeded by date for reproducibility. Generates ``24 * (history_days + 1)``
+    hourly rows ending at 23:00 UTC on ``date`` so the merge with
+    :func:`synthesize_pm25` aligns and 48-hour lag features have history.
 
     Args:
-        date: Date string in YYYY-MM-DD format — used as the random seed.
-        rows: Number of hourly rows to generate (default: 24).
+        date:         End-date string in YYYY-MM-DD format — used as the seed.
+        history_days: Days of history to generate before ``date`` (default: HISTORY_DAYS).
 
     Returns:
         DataFrame with [timestamp, temperature, humidity] matching fetch_weather.
     """
+    rows = 24 * (history_days + 1)
     seed = abs(hash(f"weather-{date}")) % (2**32)
     rng = np.random.default_rng(seed)
-    timestamps = pd.date_range(
-        start=f"{date}T00:00:00", periods=rows, freq="h", tz="UTC"
-    )
+    start_ts = pd.Timestamp(date, tz="UTC") - pd.Timedelta(days=history_days)
+    timestamps = pd.date_range(start=start_ts, periods=rows, freq="h", tz="UTC")
     hour_of_day = np.arange(rows) % 24
     # Diurnal temperature swing centered on ~10 °C
     temperature = 10.0 + 6.0 * np.sin((hour_of_day - 6) * np.pi / 12) + rng.normal(0, 1.0, rows)

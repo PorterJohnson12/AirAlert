@@ -18,6 +18,7 @@ Conventions per W6A1 Part 2 (every task):
 
 from __future__ import annotations
 
+import json
 import sys
 from pathlib import Path
 
@@ -109,33 +110,32 @@ def airalert_pipeline():
 
     @task
     def engineer_features(validated_path: str) -> str:
-        """Owner: TR. Reads Contract 1, produces Contract 2.
+        """Owner: TR. Reads Contract 1, produces Contract 2."""
+        from include.src.transform import transform
 
-        Idempotency check + import path will be finalized by TR after the
-        ``include/src/transform.py`` migration lands in his PR. Until then
-        this body imports from the current ``src.transform`` location.
-        """
         ds = get_current_context()["ds"]
         out = f"include/data/features/features_{ds}.csv"
         if Path(out).exists():
             return out
 
         Path(out).parent.mkdir(parents=True, exist_ok=True)
-
-        try:
-            from include.src.transform import transform  # post-TR-migration import
-        except ImportError:
-            from src.transform import transform  # pre-migration fallback
-
         return transform(validated_path, out)
 
     @task
-    def retrain_model(features_path: str) -> str:
+    def retrain_model(features_path: str) -> dict:
         """Owner: PJ. Trains one model per city, logs to MLflow, writes
-        latest_model.pkl + metrics_{ds}.json. Returns the metrics JSON path."""
+        latest_model.pkl + metrics_{ds}.json.
+
+        Returns the parsed metrics dict (W6A1 Part 4: XCom return_value must
+        contain f1, baseline_f1, accuracy, precision, recall). The metrics
+        JSON path is included under ``metrics_path`` for downstream consumers.
+        """
         from include.src.train import train
 
-        return train(features_path)
+        metrics_path = train(features_path)
+        metrics = json.loads(Path(metrics_path).read_text())
+        metrics["metrics_path"] = metrics_path
+        return metrics
 
     raw = fetch_air_quality()
     validated = validate_schema(raw)
