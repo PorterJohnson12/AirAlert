@@ -7,12 +7,13 @@ computes 48-hour lag windows for pm25 and temperature, adds cyclical
 encodings for hour-of-day and day-of-week, and labels each row as
 is_unsafe based on the EPA 24-hr PM2.5 threshold.
 
-Input schema (Contract 1):  data/raw/pm25_{YYYY-MM-DD}.csv
-Output schema (Contract 2): data/features/features_{YYYY-MM-DD}.csv
+Input schema (Contract 1):  include/data/raw/pm25_{YYYY-MM-DD}.csv
+Output schema (Contract 2): include/data/features/features_{YYYY-MM-DD}.csv
 
 Output columns:
     timestamp               datetime64[ns, UTC]
     location_id             int64
+    city                    string  — per-city routing key (Decision 6)
     is_unsafe               int8    — 1 if pm25 > UNSAFE_THRESHOLD, else 0
     pm25_lag_1h … _48h      float64 — 48 lag columns
     temperature_lag_1h…_48h float64 — 48 lag columns
@@ -159,7 +160,7 @@ def transform(input_path: str, output_path: str) -> str:
     if df.empty:
         raise ValueError(f"No complete rows remain after feature engineering for {input_path}.")
 
-    output_cols = [DATETIME_COL, "location_id", "is_unsafe"] + FEATURE_COLS
+    output_cols = [DATETIME_COL, "location_id", "city", "is_unsafe"] + FEATURE_COLS
     df = df[output_cols]
 
     Path(output_path).parent.mkdir(parents=True, exist_ok=True)
@@ -170,25 +171,6 @@ def transform(input_path: str, output_path: str) -> str:
 # ── Airflow task wrapper ───────────────────────────────────────────────────────
 
 
-def transform_task(**context) -> str:
-    """Airflow task: engineer features for the day's raw ingest output.
-
-    Pulls the input file path from the upstream ingest_task via XCom.
-    Writes the feature CSV to data/features/features_{ds}.csv and returns
-    the path for the downstream train task.
-
-    Args:
-        **context: Airflow task context dict (injected by the DAG runner).
-
-    Returns:
-        Path to the written features CSV file.
-    """
-    date: str = context["ds"]
-    input_path: str = context["ti"].xcom_pull(task_ids="ingest_task")
-    output_path: str = f"data/features/features_{date}.csv"
-    return transform(input_path, output_path)
-
-
 # ── Local dev entry point ──────────────────────────────────────────────────────
 
 if __name__ == "__main__":
@@ -196,8 +178,8 @@ if __name__ == "__main__":
 
     date = sys.argv[1] if len(sys.argv) > 1 else "2026-04-25"
     out = transform(
-        input_path=f"data/raw/pm25_{date}.csv",
-        output_path=f"data/features/features_{date}.csv",
+        input_path=f"include/data/raw/pm25_{date}.csv",
+        output_path=f"include/data/features/features_{date}.csv",
     )
     df = pd.read_csv(out)
     print(f"Written to {out}")

@@ -30,6 +30,7 @@ Owner: Porter Johnson
 from __future__ import annotations
 
 import os
+from datetime import date as date_type, timedelta
 from pathlib import Path
 
 import numpy as np
@@ -46,6 +47,9 @@ OPENMETEO_BASE_URL: str = "https://archive-api.open-meteo.com/v1/archive"
 OPENAQ_PM25_PARAMETER_ID: int = 2
 DATETIME_COL: str = "timestamp"
 MAX_GAP_HOURS: int = 6  # drop location if gap exceeds this (Decision 2)
+# Days of prior history fetched alongside ds so transform.py has enough rows
+# for 48h lag features. Window is ds-HISTORY_DAYS … ds, inclusive.
+HISTORY_DAYS: int = 2
 
 # Per-city models (Decision 6). The set of valid city labels — every row
 # emitted by ingest must have city in this tuple.
@@ -296,6 +300,11 @@ def merge_and_fill(
     merged["pm25"] = merged["pm25"].interpolate(
         method="linear", limit_direction="both"
     )
+    # Open-Meteo returns integer humidity (e.g. 32, 34) which round-trips through
+    # CSV as int64 and fails Contract 1's float64 dtype check in validate_schema.
+    # Force the float weather columns here so the saved CSV preserves them.
+    merged["temperature"] = merged["temperature"].astype("float64")
+    merged["humidity"] = merged["humidity"].astype("float64")
     return merged[
         [DATETIME_COL, "location_id", "pm25", "temperature", "humidity", "pm25_imputed"]
     ]
@@ -417,15 +426,18 @@ def run_all_locations(
     date: str,
     output_dir: str = "include/data/raw",
 ) -> str:
-    """Run ingest for every entry in LOCATION_REGISTRY and produce one CSV.
+    """Run ingest for every (location × day) in a HISTORY_DAYS+1 window.
 
-    Calls :func:`run_ingest` per location, concatenates the per-location frames,
-    and writes a single ``pm25_{date}.csv`` matching Contract 1. Idempotent —
+    Calls :func:`run_ingest` per location per day from ``ds-HISTORY_DAYS`` to
+    ``ds`` (inclusive), concatenates the per-location-per-day frames, and writes
+    a single ``pm25_{date}.csv`` matching Contract 1. The window exists so
+    transform.py has 48 hours of prior history available for lag features —
+    without it every row gets dropped by ``drop_incomplete_rows``. Idempotent —
     if the combined CSV already exists, returns its path without re-fetching.
     This is the entry point used by the ``fetch_air_quality`` Airflow task.
 
     Args:
-        date:       UTC date to ingest in YYYY-MM-DD format.
+        date:       UTC ``ds`` date to ingest in YYYY-MM-DD format.
         output_dir: Directory for the combined CSV (default: ``include/data/raw``).
 
     Returns:
@@ -445,17 +457,24 @@ def run_all_locations(
             "(location_id -> {city, lat, lon, sensor_id}) entry in include/src/ingest.py."
         )
 
+    ds = date_type.fromisoformat(date)
+    window = [
+        (ds - timedelta(days=offset)).isoformat()
+        for offset in range(HISTORY_DAYS, -1, -1)
+    ]
+
     frames: list[pd.DataFrame] = []
     for location_id, meta in LOCATION_REGISTRY.items():
-        per_loc_path = run_ingest(
-            sensor_id=int(meta["sensor_id"]),
-            location_id=location_id,
-            latitude=float(meta["lat"]),
-            longitude=float(meta["lon"]),
-            date=date,
-            city=meta["city"],
-        )
-        frames.append(pd.read_csv(per_loc_path, parse_dates=[DATETIME_COL]))
+        for day in window:
+            per_loc_path = run_ingest(
+                sensor_id=int(meta["sensor_id"]),
+                location_id=location_id,
+                latitude=float(meta["lat"]),
+                longitude=float(meta["lon"]),
+                date=day,
+                city=meta["city"],
+            )
+            frames.append(pd.read_csv(per_loc_path, parse_dates=[DATETIME_COL]))
 
     combined = pd.concat(frames, ignore_index=True)
     combined.to_csv(output_path, index=False)

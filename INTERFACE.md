@@ -15,7 +15,7 @@ This is a living document. You will update it as you learn more about the system
 | `include/src/transform.py` (W6A1 task: `engineer_features`) | Ted Roper | Porter Johnson |
 | `include/src/train.py` (W6A1 task: `retrain_model`) | Porter Johnson | Ted Roper |
 | `validate_schema` task (inline in DAG) | Ted Roper | Porter Johnson |
-| `src/serve.py` | Ted Roper | Porter Johnson |
+| `include/src/serve.py` | Ted Roper | Porter Johnson |
 | `dags/airalert_dag.py` | Both | Both |
 | `app/dashboard.py` | Both | Both |
 
@@ -198,9 +198,11 @@ A single global model would blur city-specific pollution patterns — Ogden's re
 - Does your chosen model's `predict_proba` output produce well-calibrated probabilities, or do they cluster near 0 and 1 in a way that would mislead a user reading a confidence score?
 - What does `unsafe_probability = 0.72` actually mean to someone using the dashboard — and is your model's output trustworthy enough to display that number?
 
-**Your decision:** *(defer to W6D3)*
+**Your decision:**
+Use `LogisticRegression(class_weight="balanced", solver="liblinear")` as the W6A1 classifier. `serve.py` returns `predict_proba()[:, 1]` directly as `unsafe_probability` without post-hoc calibration.
 
-**Your reasoning:** *(defer to W6D3)*
+**Your reasoning:**
+LogisticRegression's `predict_proba` uses a sigmoid transform, so its outputs are well-calibrated out of the box — a score of 0.72 genuinely represents approximately 72% confidence in the unsafe prediction, which is meaningful to display on the dashboard. Tree ensembles (Random Forest, XGBoost) produce leaf-frequency probabilities that cluster near 0 and 1 and require a post-hoc `CalibratedClassifierCV` wrapper before they can be trusted; we don't want to add that complexity to `serve.py` for a W6A1 placeholder. `class_weight="balanced"` handles the unsafe-class minority without oversampling. The model is explicitly labelled as a placeholder — swapping to a calibrated ensemble in a later week requires only changing `train.py`; `serve.py` and `dashboard.py` rely solely on `.predict_proba()` and are unaffected.
 
 ---
 
@@ -255,6 +257,7 @@ Output file: `include/data/features/features_{YYYY-MM-DD}.csv`
 |---|---|---|---|
 | `timestamp` | datetime64[ns, UTC] | No | 2024-01-15 06:00:00+00:00 |
 | `location_id` | int64 | No | 1265 |
+| `city` | string | No | `salt_lake_city` |
 | `is_unsafe` | int8 | No | 0 |
 | `pm25_lag_1h` | float64 | No | 8.3 |
 | `pm25_lag_2h` | float64 | No | 7.1 |
@@ -269,7 +272,7 @@ Output file: `include/data/features/features_{YYYY-MM-DD}.csv`
 | `day_sin` | float64 | No | 0.782 |
 | `day_cos` | float64 | No | 0.623 |
 
-> **Note:** Columns `pm25_lag_4h` through `pm25_lag_47h` and `temperature_lag_4h` through `temperature_lag_47h` follow the same pattern. Total columns: 2 (id/time) + 1 (target) + 48 (pm25 lags) + 48 (temp lags) + 4 (cyclical encodings) = 103.
+> **Note:** Columns `pm25_lag_4h` through `pm25_lag_47h` and `temperature_lag_4h` through `temperature_lag_47h` follow the same pattern. Total columns: 3 (id/time/city) + 1 (target) + 48 (pm25 lags) + 48 (temp lags) + 4 (cyclical encodings) = 104. `city` is carried through from Contract 1 (Decision 6) so `train.py` can route rows to the right per-city model without a separate lookup.
 
 ---
 
@@ -373,3 +376,4 @@ When you update this document mid-project, record it here.
 | 2026-05-07 | Decision 3 finalized: F1<0.60 on unsafe class, previous-day eval, per city | W6A1 Part 1 — switched from R² (wrong metric for binary classification) to F1 on unsafe class | PJ done; TR sign off in PR |
 | 2026-05-07 | W6A1 ownership: PJ → fetch_air_quality + retrain_model (2 tasks); TR → engineer_features + validate_schema (2 tasks). PJ scaffolds initial validate_schema body inline in DAG; TR refines as documented owner. Also corrected serve.py owner to TR (was PJ in W5A1 split). | Balanced 2-2 split per W6A1 Part 2 | Yes |
 | 2026-05-07 | Added `latitude` and `longitude` columns to Contract 1; migrated all data and source paths to `include/data/` and `include/src/` | W6A1 requires `include/` layout, Part 4 verifies 9 columns in raw CSV (lat/lon were referenced in merge rules but never made it into the schema) | PJ done; TR sign off in PR |
+| 2026-05-10 | Added `city` column to Contract 2; ingest now fetches a 3-day window (`HISTORY_DAYS=2`) per run | `train.py` filters by city and 48h lag features need 48h of prior history — without these, every feature row was dropped and the green run failed | Yes |
