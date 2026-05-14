@@ -285,6 +285,17 @@ def train(
 
     joblib.dump(per_city_models, models_dir / "latest_model.pkl")
 
+    # Persist the PM2.5 reference distribution so tomorrow's drift_check task
+    # has something to compare against. We snapshot here (after a successful
+    # train) rather than during transform so the reference always reflects the
+    # data the latest deployed model was trained on (W7A1 Part 2).
+    from include.src.drift import compute_pm25_stats, save_reference
+
+    save_reference(
+        compute_pm25_stats(input_p),
+        path=models_dir / "reference_pm25_stats.json",
+    )
+
     metrics_payload = {
         **aggregate,
         "per_city": per_city_metrics,

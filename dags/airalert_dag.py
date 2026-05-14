@@ -1,11 +1,12 @@
 """
-airalert_dag.py — daily AirAlert pipeline (W6A1).
+airalert_dag.py — daily AirAlert pipeline (W6A1 + W7A1).
 
-Wires four Airflow tasks following the TaskFlow API pattern:
+Wires five Airflow tasks following the TaskFlow API pattern:
 
     fetch_air_quality   (PJ) → include/src/ingest.py
     validate_schema     (TR) → inline @task — PJ scaffolded; TR iterates
     engineer_features   (TR) → include/src/transform.py
+    drift_check         (TR) → include/src/drift.py   (added W7A1 Part 2)
     retrain_model       (PJ) → include/src/train.py
 
 Conventions per W6A1 Part 2 (every task):
@@ -60,7 +61,7 @@ CONTRACT_1_DTYPES: dict[str, str] = {
     start_date=datetime(2026, 1, 1),
     schedule="0 6 * * *",  # daily at 6 AM UTC, per copilot-instructions.md
     catchup=False,
-    default_args={"owner": "airalert", "retries": 1},
+    default_args={"owner": "airalert", "retries": 2},
     tags=["airalert"],
     doc_md=__doc__,
 )
@@ -121,6 +122,52 @@ def airalert_pipeline():
         return transform(validated_path, out)
 
     @task
+    def drift_check(features_path: str) -> str:
+        """Owner: TR. Compares today's PM2.5 distribution against the saved
+        reference from the last successful retrain and logs mean_shift_sigma
+        + drifted to MLflow under the ``AirAlert-drift`` experiment.
+
+        Writes ``include/models/drift_{ds}.json`` and returns the path. Cold
+        start (first ever run, no reference yet) is not an error: the task
+        logs zero shift, sets drifted=False, and lets the DAG go green so the
+        next run has a reference to compare against.
+        """
+        from include.src.drift import DEFAULT_REFERENCE_PATH, check_drift
+        from include.src.train import MLFLOW_URI, _mlflow_reachable
+
+        ds = get_current_context()["ds"]
+        models_dir = Path("include/models")
+        models_dir.mkdir(parents=True, exist_ok=True)
+        out = models_dir / f"drift_{ds}.json"
+        if out.exists():
+            return str(out)
+
+        result = check_drift(features_path, reference_path=DEFAULT_REFERENCE_PATH)
+        result["ds"] = ds
+        result["features_path"] = features_path
+        out.write_text(json.dumps(result, indent=2))
+
+        if _mlflow_reachable(MLFLOW_URI):
+            try:
+                import mlflow
+
+                mlflow.set_tracking_uri(MLFLOW_URI)
+                mlflow.set_experiment("AirAlert-drift")
+                with mlflow.start_run(run_name=f"drift_{ds}"):
+                    mlflow.log_metric("mean_shift_sigma", result["mean_shift_sigma"])
+                    mlflow.log_metric("drifted", int(result["drifted"]))
+                    mlflow.log_metric("recent_mean", result["recent_mean"])
+                    mlflow.log_metric("n_recent", result["n_recent"])
+                    if not result["cold_start"]:
+                        mlflow.log_metric("reference_mean", result["reference_mean"])
+            except Exception as exc:
+                print(f"[mlflow] drift logging failed: {exc!r} — continuing without it")
+        else:
+            print(f"[mlflow] {MLFLOW_URI} not reachable — skipping drift logging")
+
+        return str(out)
+
+    @task
     def retrain_model(features_path: str) -> dict:
         """Owner: PJ. Trains one model per city, logs to MLflow, writes
         latest_model.pkl + metrics_{ds}.json.
@@ -139,7 +186,7 @@ def airalert_pipeline():
     raw = fetch_air_quality()
     validated = validate_schema(raw)
     features = engineer_features(validated)
-    retrain_model(features)
+    drift_check(features) >> retrain_model(features)
 
 
 airalert_pipeline()

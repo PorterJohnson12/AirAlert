@@ -16,6 +16,7 @@ This is a living document. You will update it as you learn more about the system
 | `include/src/train.py` (W6A1 task: `retrain_model`) | Porter Johnson | Ted Roper |
 | `validate_schema` task (inline in DAG) | Ted Roper | Porter Johnson |
 | `include/src/serve.py` | Ted Roper | Porter Johnson |
+| `include/src/drift.py` (W7A1 task: `drift_check`) | Ted Roper | Porter Johnson |
 | `dags/airalert_dag.py` | Both | Both |
 | `app/dashboard.py` | Both | Both |
 
@@ -38,6 +39,8 @@ These values are fixed and must be identical everywhere they appear in the codeb
 | `LAG_WINDOW_HOURS` | `48` | `transform.py` |
 | `MIN_COVERAGE_FRACTION` | `0.5` | `transform.py`, `train.py` |
 | `MAX_GAP_HOURS` | `6` | `ingest.py` |
+| `HISTORY_DAYS` | `2` | `ingest.py` |
+| `DRIFT_SIGMA_THRESHOLD` | `2.0` | `drift.py`, `dags/airalert_dag.py` |
 | `CITY_MODEL_KEYS` | `("salt_lake_city", "ogden", "provo")` | `ingest.py`, `transform.py`, `train.py`, `serve.py` |
 
 > **Timezone rule:** All datetime values in this pipeline are stored and merged in UTC. OpenAQ returns timestamps in UTC natively. Open-Meteo returns timestamps in the timezone specified by the `&timezone=` query parameter — always pass `timezone=UTC` when calling Open-Meteo so both sources align without conversion.
@@ -142,6 +145,9 @@ Retrain immediately if the previous day's F1 score on the unsafe (positive) clas
 **Your reasoning:**
 Accuracy is misleading on this dataset — unsafe hours are the minority class, so a model that always predicts "safe" can score 90%+ accuracy while being useless for the only prediction users actually care about. F1 on the unsafe class jointly captures precision (don't cry wolf) and recall (don't miss real unsafe hours), and 0.60 is the operating point below which a public-health alert system stops being trustworthy: missing too many unsafe hours undermines the entire reason the system exists. Checking against the previous day rather than a rolling window means we catch drift fast — when a sensor calibration shifts or a smoke event changes the input distribution, we want the retrain to fire the next morning, not seven days later.
 
+**Consistency with drift threshold (W7A1):**
+The retraining trigger above (F1<0.60) and the drift threshold in `drift.py` (`DRIFT_SIGMA_THRESHOLD = 2.0`) are deliberately coupled but not redundant. A 2-σ shift in the PM2.5 mean is the *early-warning* signal that the input distribution is moving; F1<0.60 is the *act-now* signal that performance has actually fallen. Either signal independently fires a retrain. Setting the drift threshold this low (2-σ vs the more common 3-σ) trades a few extra retraining runs for a smaller chance that a real distribution shift quietly degrades F1 between daily evaluations — acceptable because retraining is cheap (seconds per city on CPU).
+
 ---
 
 ### Decision 4 — Feature engineering choices
@@ -207,7 +213,7 @@ LogisticRegression's `predict_proba` uses a sigmoid transform, so its outputs ar
 ---
 
 ### Decision 8 — How the dashboard sources input data
-*⏳ Complete by W7D2 — when you build the dashboard*
+*✅ Complete in W7A1*
 
 **The question:** When a user opens the dashboard, where do the input feature values come from — manual entry, live API fetch, or pre-loaded location values?
 
@@ -215,9 +221,11 @@ LogisticRegression's `predict_proba` uses a sigmoid transform, so its outputs ar
 - Can a non-technical user reasonably be expected to know their local PM2.5 lag values, and if not, what does that mean for the usability of manual entry?
 - What failure modes does each approach introduce, and which tradeoff is most acceptable given your serving architecture?
 
-**Your decision:** *(defer to W7D2)*
+**Your decision:**
+Pre-loaded from the latest features CSV. The user picks a city; the dashboard reads the most recent row for that city out of the newest `include/data/features/features_{date}.csv` produced by the Airflow pipeline and submits that vector to `POST /predict`. The PM2.5 trend chart is sourced from the matching `include/data/raw/pm25_{date}.csv`. No manual lag entry; no live API calls inside the dashboard process.
 
-**Your reasoning:** *(defer to W7D2)*
+**Your reasoning:**
+A non-technical user cannot realistically know — let alone type in — 48 PM2.5 lag values and 48 temperature lag values, so manual entry was off the table from the start. Live API fetch from inside the dashboard would re-implement `ingest.py` in a second process and inherit all of its failure modes (rate limits, API outages, the synthetic-fallback decision) at the worst possible moment — when the user is staring at the screen. The pipeline already produces a fresh, validated features CSV every morning; the dashboard's job is to surface that artifact, not re-derive it. This also keeps the dashboard stateless and trivially testable: any CSV in `include/data/features/` is a valid input fixture.
 
 ---
 
@@ -291,13 +299,13 @@ FEATURE_COLS = (
 # Length: 100 features
 ```
 
-*Complete Decision 7 (classifier choice) before finalising this contract.*
+*Finalized: Decision 7 locked LogisticRegression with uncalibrated `predict_proba` — the sigmoid output is well-calibrated for this binary classifier, so no post-hoc wrapper is needed.*
 
 ---
 
 ### Contract 4: `serve.py` → `dashboard.py`
 
-*Complete Decision 8 (dashboard data sourcing) before finalising this contract.*
+*Finalized: Decision 8 locks the dashboard to a pre-loaded feature vector — the user selects a city, the dashboard reads the latest row from `include/data/features/features_{date}.csv`, and POSTs that vector here. The dashboard never loads the model itself.*
 
 **API endpoint:** `POST http://localhost:8000/predict`
 
@@ -377,3 +385,4 @@ When you update this document mid-project, record it here.
 | 2026-05-07 | W6A1 ownership: PJ → fetch_air_quality + retrain_model (2 tasks); TR → engineer_features + validate_schema (2 tasks). PJ scaffolds initial validate_schema body inline in DAG; TR refines as documented owner. Also corrected serve.py owner to TR (was PJ in W5A1 split). | Balanced 2-2 split per W6A1 Part 2 | Yes |
 | 2026-05-07 | Added `latitude` and `longitude` columns to Contract 1; migrated all data and source paths to `include/data/` and `include/src/` | W6A1 requires `include/` layout, Part 4 verifies 9 columns in raw CSV (lat/lon were referenced in merge rules but never made it into the schema) | PJ done; TR sign off in PR |
 | 2026-05-10 | Added `city` column to Contract 2; ingest now fetches a 3-day window (`HISTORY_DAYS=2`) per run | `train.py` filters by city and 48h lag features need 48h of prior history — without these, every feature row was dropped and the green run failed | Yes |
+| 2026-05-13 | W7A1: Decisions 7 and 8 finalized; added `drift_check` task and `include/src/drift.py`; added `DRIFT_SIGMA_THRESHOLD=2.0` to Shared Constants; added drift-threshold consistency paragraph to Decision 3; finalized Contracts 3 and 4; added `app/dashboard.py` per Decision 8 (pre-loaded features) | Closes out W7A1 — drift detection, FastAPI serving, and Streamlit dashboard now wired end-to-end | Yes |
