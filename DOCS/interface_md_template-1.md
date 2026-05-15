@@ -218,7 +218,8 @@ A single global model would blur city-specific pollution patterns — Ogden's re
 - What does `unsafe_probability = 0.72` actually mean to someone using the dashboard — and is your model's output trustworthy enough to display that number?
 
 **Your decision:**
-use a random forest classifier and apply isotonic regression for probability calibration.
+Use a random forest classifier and apply isotonic regression for probability calibration.
+
 **Your reasoning:**
 Random forests are robust, handle non-linear relationships, and provide feature importance insights. However, their raw probabilities can be poorly calibrated. Isotonic regression is a non-parametric calibration method that can adjust the predicted probabilities to better reflect true likelihoods, making the `unsafe_probability` more interpretable and trustworthy for end-users.
 
@@ -234,9 +235,10 @@ Random forests are robust, handle non-linear relationships, and provide feature 
 - What failure modes does each approach introduce, and which tradeoff is most acceptable given your serving architecture?
 
 **Your decision:**
-the user will only enter their location (city), and the dashboard will fetch the latest features for that city from a new API endpoint in serve.py that queries the most recent data and runs it through the same transformations as train.py to produce a real-time prediction.
+The user will only enter their location (city), and the dashboard will fetch the latest features for that city from a new API endpoint in serve.py that queries the most recent data and runs it through the same transformations as train.py to produce a real-time prediction.
+
 **Your reasoning:**
-we want to make it as easy and straight forward for the usetr as possible. Requiring users to manually enter technical features like PM2.5 lags would be a major barrier to usability and prone to error. By building an API endpoint that serves real-time predictions based on the latest data, we can provide a seamless experience where users simply select their city and receive an up-to-date air quality forecast without needing any technical knowledge.
+We want to make it as easy and straight forward for the usetr as possible. Requiring users to manually enter technical features like PM2.5 lags would be a major barrier to usability and prone to error. By building an API endpoint that serves real-time predictions based on the latest data, we can provide a seamless experience where users simply select their city and receive an up-to-date air quality forecast without needing any technical knowledge.
 ---
 
 ## Data Contracts

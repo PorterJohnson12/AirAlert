@@ -57,7 +57,9 @@ LAG_WINDOW_HOURS: int = 48
 # Joblib fallback: include/src/train.py always writes a {city: estimator}
 # dict here, even when MLflow is unreachable.  Used by the lifespan when the
 # MLflow tracking server is down so the API can still serve predictions.
-MODELS_PICKLE_PATH: Path = Path("include/models/latest_model.pkl")
+# Anchored to the repo root so uvicorn can be launched from any CWD.
+_REPO_ROOT: Path = Path(__file__).resolve().parents[2]
+MODELS_PICKLE_PATH: Path = _REPO_ROOT / "include" / "models" / "latest_model.pkl"
 
 # location_id → city lookup.  Mirrors the LOCATION_REGISTRY in
 # include/src/ingest.py (which carries extra sensor_id / lat / lon fields
@@ -126,6 +128,27 @@ class PredictResponse(BaseModel):
 _models: dict[str, Any] = {}
 
 
+def _mlflow_reachable(uri: str, timeout: float = 1.0) -> bool:
+    """TCP probe — returns True only if the tracking URI accepts connections.
+
+    Mirrors include/src/train.py's _mlflow_reachable so serve.py does not block
+    on the 120s default HTTP timeout when no MLflow server is running.  The
+    server must come up in seconds even when MLflow is offline (W7A1 Part 3:
+    the FastAPI service is the primary serving path, not MLflow).
+    """
+    from urllib.parse import urlparse
+    import socket
+
+    parsed = urlparse(uri)
+    host = parsed.hostname or "localhost"
+    port = parsed.port or (443 if parsed.scheme == "https" else 80)
+    try:
+        with socket.create_connection((host, port), timeout=timeout):
+            return True
+    except OSError:
+        return False
+
+
 def _load_from_mlflow() -> dict[str, Any]:
     """Try to load every city model from the MLflow tracking server.
 
@@ -134,14 +157,21 @@ def _load_from_mlflow() -> dict[str, Any]:
     Production stage first per INTERFACE.md, then falls back to the
     'latest' alias since train.py registers without transitioning stages.
 
+    Raises a generic Exception immediately if the tracking URI is unreachable,
+    so the lifespan can fall back to the joblib pickle without waiting on a
+    120s HTTP timeout (the same hang PJ caught in train.py's MLflow logging).
+
     Returns:
         dict mapping each city in CITY_MODEL_KEYS to a scikit-learn estimator.
 
     Raises:
+        ConnectionError: If the MLflow tracking server is unreachable.
         mlflow.exceptions.MlflowException: If any city model cannot be loaded
             under either Production or latest.  The lifespan catches this and
             falls back to the joblib pickle.
     """
+    if not _mlflow_reachable(MLFLOW_URI):
+        raise ConnectionError(f"MLflow tracking server at {MLFLOW_URI} is not reachable.")
     mlflow.set_tracking_uri(MLFLOW_URI)
     loaded: dict[str, Any] = {}
     for city in CITY_MODEL_KEYS:
@@ -435,13 +465,13 @@ def serve_task(**context: Any) -> str:
 
     Launch the server outside the DAG with:
 
-        uvicorn SRC.serve:app --host 0.0.0.0 --port 8000
+        uvicorn include.src.serve:app --host 0.0.0.0 --port 8000
 
     If the team later decides to manage the server process from the DAG,
     replace this body with a subprocess.Popen call and return the server URL:
 
         import subprocess
-        subprocess.Popen(["uvicorn", "SRC.serve:app", "--port", str(PORT)])
+        subprocess.Popen(["uvicorn", "include.src.serve:app", "--port", str(PORT)])
         return f"http://localhost:{PORT}/predict"
 
     Args:

@@ -135,7 +135,7 @@ def transform(input_path: str, output_path: str) -> str:
     insufficient lag history, and writes the result.
 
     Args:
-        input_path:  Path to a Contract 1 CSV (data/raw/pm25_{date}.csv).
+        input_path:  Path to a Contract 1 CSV (include/data/raw/pm25_{date}.csv).
         output_path: Destination path for the Contract 2 CSV.
 
     Returns:

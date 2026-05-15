@@ -3,3 +3,8 @@ fastapi
 uvicorn[standard]
 mlflow
 pandas
+scikit-learn
+joblib
+streamlit
+requests
+python-dotenv
